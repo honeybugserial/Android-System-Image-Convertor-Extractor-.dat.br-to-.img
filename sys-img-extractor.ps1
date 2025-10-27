@@ -1,8 +1,9 @@
 <#
-ROM Extractor / Converter Utilitys
+ROM Extractor / Converter Utility (final polished)
 - Handles overwrites safely
 - Interactive .zip and .dat.br selection
 - Cleanup prompt for temp_files directory on exit
+- Colored menu numbers and [FOUND] labels
 #>
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
@@ -128,39 +129,49 @@ function FullZip-ToIMG {
 }
 
 function DatBr-ToIMG {
-    Banner "DAT.BR to system.img"
-    $datBr = Get-ChildItem "$TempDir\system.new.dat.br" -File | Select-Object -First 1
-    $list  = Get-ChildItem "$TempDir\system.transfer.list" -File | Select-Object -First 1
+    Banner "DAT.BR to IMG"
+    $datBr = Get-ChildItem "$TempDir\*.dat.br" -File | Select-Object -First 1
+    $list  = Get-ChildItem "$TempDir\*.transfer.list" -File | Select-Object -First 1
 
     if(-not ((Test-Path $datBr) -and (Test-Path $list))) {
-        ErrorMsg "Need system.new.dat.br and system.transfer.list inside $TempDir"
+        ErrorMsg "No .dat.br and .transfer.list pair found inside $TempDir"
         Pause
         return
     }
 
-    $dat = $datBr.FullName -replace '\.br$',''
+    # derive base name, e.g. system.new.dat.br -> system.img
+    $base = [IO.Path]::GetFileNameWithoutExtension([IO.Path]::GetFileNameWithoutExtension($datBr.Name))
+    $dat  = Join-Path $TempDir ($base + ".new.dat")
+    $img  = Join-Path $OutDir  ($base + ".img")
+
     Brotli-Convert $datBr.FullName $dat
-    $img = Join-Path $OutDir 'system.img'
     SDAT-ToIMG $dat $list.FullName $img
     Pause
 }
+
 
 function DatBr-Manual {
     Banner "Select .dat.br manually"
     $datBr = Select-DatBr
     if(-not $datBr){Warn "Cancelled."; Pause; return}
-    $list = Get-ChildItem "$TempDir\system.transfer.list" -File | Select-Object -First 1
-    if(-not (Test-Path $list)){
-        ErrorMsg "system.transfer.list missing in $TempDir."
+
+    $list = Get-ChildItem "$TempDir\*.transfer.list" -File | Select-Object -First 1
+    if(-not (Test-Path $list)) {
+        ErrorMsg "No transfer list (.transfer.list) found in $TempDir"
         Pause
         return
     }
-    $dat = $datBr.FullName -replace '\.br$',''
+
+    # derive base name dynamically
+    $base = [IO.Path]::GetFileNameWithoutExtension([IO.Path]::GetFileNameWithoutExtension($datBr.Name))
+    $dat  = Join-Path $TempDir ($base + ".new.dat")
+    $img  = Join-Path $OutDir  ($base + ".img")
+
     Brotli-Convert $datBr.FullName $dat
-    $img = Join-Path $OutDir 'system.img'
     SDAT-ToIMG $dat $list.FullName $img
     Pause
 }
+
 
 function Payload-ToIMG {
     Banner "payload.bin to images"
