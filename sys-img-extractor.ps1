@@ -1,9 +1,8 @@
 <#
-ROM Extractor / Converter Utility (final polished)
-- Handles overwrites safely
-- Interactive .zip and .dat.br selection
-- Cleanup prompt for temp_files directory on exit
-- Colored menu numbers and [FOUND] labels
+ROM Extractor / Converter Utility (final recursive)
+- Scans nested directories for ROM files
+- Handles .dat, .dat.br, .br.dat
+- Retains all previous safety and visual improvements
 #>
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
@@ -36,38 +35,16 @@ function Warn($msg){Write-Host "[WARN]  $msg" -ForegroundColor Yellow}
 function ErrorMsg($msg){Write-Host "[ERROR] $msg" -ForegroundColor Red}
 function Done($msg){Write-Host "[DONE]  $msg" -ForegroundColor Green}
 
+# Recursive search helper
+function Find-FileRecursive($basePath, $patterns) {
+    $results = @()
+    foreach ($pattern in $patterns) {
+        $results += Get-ChildItem -Path $basePath -Filter $pattern -File -Recurse -ErrorAction SilentlyContinue
+    }
+    return $results | Sort-Object LastWriteTime -Descending
+}
+
 # ---------------- Core helpers ----------------
-function Select-Zip {
-    $zips = Get-ChildItem "$ScriptDir\*.zip" -File | Sort-Object LastWriteTime -Descending
-    if(-not $zips){ErrorMsg "No zip files found."; Pause; return $null}
-
-    Write-Host "Available ZIP files:`n" -ForegroundColor Cyan
-    for($i=0; $i -lt $zips.Count; $i++) {
-        Write-Host ("[$i] " + $zips[$i].Name) -ForegroundColor Cyan
-    }
-
-    do {
-        $sel = Read-Host "Enter number of zip to extract (or Q to cancel)"
-        if($sel -match '^[Qq]$'){return $null}
-    } while ($sel -notmatch '^\d+$' -or [int]$sel -ge $zips.Count)
-
-    return $zips[[int]$sel]
-}
-
-function Select-DatBr {
-    $datFiles = Get-ChildItem "$TempDir\*.dat.br" -File | Sort-Object LastWriteTime -Descending
-    if(-not $datFiles){ErrorMsg "No .dat.br files found in $TempDir"; Pause; return $null}
-    Write-Host "Available .dat.br files:`n" -ForegroundColor Cyan
-    for($i=0; $i -lt $datFiles.Count; $i++) {
-        Write-Host ("[$i] " + $datFiles[$i].Name) -ForegroundColor Cyan
-    }
-    do {
-        $sel = Read-Host "Enter number of file to convert (or Q to cancel)"
-        if($sel -match '^[Qq]$'){return $null}
-    } while ($sel -notmatch '^\d+$' -or [int]$sel -ge $datFiles.Count)
-    return $datFiles[[int]$sel]
-}
-
 function Safe-Output($targetPath){
     if(Test-Path $targetPath){
         Warn "$([IO.Path]::GetFileName($targetPath)) already exists."
@@ -102,105 +79,96 @@ function SDAT-ToIMG($dat,$list,$out){
     if(Test-Path $finalOut){Done "Generated: $finalOut"} else {ErrorMsg "Conversion failed!"}
 }
 
+# ---------------- Extraction Modes ----------------
 function FullZip-ToIMG {
-    Banner "Full ZIP to system.img"
-    $zip = Select-Zip
-    if(-not $zip){Warn "Cancelled."; Pause; return}
+    Banner "Full ZIP to IMG"
+    $zips = Find-FileRecursive $ScriptDir @("*.zip")
+    if(-not $zips){ErrorMsg "No zip files found."; Pause; return}
 
-    Ensure-Dir $TempDir
-    Ensure-Dir $OutDir
-    if(Test-Path $OutSystem){Remove-Item -Recurse -Force $OutSystem}
-
-    Extract-Zip $zip.FullName
-    $datBr = Join-Path $TempDir 'system.new.dat.br'
-    $dat   = Join-Path $TempDir 'system.new.dat'
-    $list  = Join-Path $TempDir 'system.transfer.list'
-
-    if(Test-Path $datBr){Brotli-Convert $datBr $dat}
-    if(-not ((Test-Path $dat) -and (Test-Path $list))) {
-        ErrorMsg "Missing .dat or transfer.list after extraction."
-        Pause
-        return
+    Write-Host "Available ZIP files:`n" -ForegroundColor Cyan
+    for($i=0; $i -lt $zips.Count; $i++) {
+        Write-Host ("[$i] " + $zips[$i].Name) -ForegroundColor Cyan
     }
 
-    $img = Join-Path $OutDir 'system.img'
-    SDAT-ToIMG $dat $list $img
+    do {
+        $sel = Read-Host "Enter number of zip to extract (or Q to cancel)"
+        if($sel -match '^[Qq]$'){return}
+    } while ($sel -notmatch '^\d+$' -or [int]$sel -ge $zips.Count)
+    $zip = $zips[[int]$sel]
+
+    if(Test-Path $OutSystem){Remove-Item -Recurse -Force $OutSystem}
+    Extract-Zip $zip.FullName
+
+    $datBr = Find-FileRecursive $TempDir @("system.new.dat.br","system.new.br.dat")
+    $dat   = Find-FileRecursive $TempDir @("system.new.dat")
+    $list  = Find-FileRecursive $TempDir @("system.transfer.list")
+
+    if($datBr){Brotli-Convert $datBr[0].FullName (Join-Path $TempDir "system.new.dat")}
+    elseif(-not $dat){ErrorMsg "No system.new.dat(.br) found."; Pause; return}
+
+    if(-not $list){ErrorMsg "No system.transfer.list found."; Pause; return}
+
+    $img = Join-Path $OutDir "system.img"
+    SDAT-ToIMG (Join-Path $TempDir "system.new.dat") $list[0].FullName $img
     Pause
 }
 
 function DatBr-ToIMG {
-    Banner "DAT.BR to IMG"
-    $datBr = Get-ChildItem "$TempDir\*.dat.br" -File | Select-Object -First 1
-    $list  = Get-ChildItem "$TempDir\*.transfer.list" -File | Select-Object -First 1
+    Banner "DAT/BR.DAT to IMG"
+    $datFiles = Find-FileRecursive $TempDir @("*.dat.br","*.br.dat","*.dat")
+    $list = Find-FileRecursive $TempDir @("*.transfer.list")
 
-    if(-not ((Test-Path $datBr) -and (Test-Path $list))) {
-        ErrorMsg "No .dat.br and .transfer.list pair found inside $TempDir"
-        Pause
-        return
+    if(-not ($datFiles -and $list)) {
+        ErrorMsg "Missing .dat/.dat.br and/or .transfer.list files."
+        Pause; return
     }
 
-    # derive base name, e.g. system.new.dat.br -> system.img
-    $base = [IO.Path]::GetFileNameWithoutExtension([IO.Path]::GetFileNameWithoutExtension($datBr.Name))
-    $dat  = Join-Path $TempDir ($base + ".new.dat")
-    $img  = Join-Path $OutDir  ($base + ".img")
-
-    Brotli-Convert $datBr.FullName $dat
-    SDAT-ToIMG $dat $list.FullName $img
-    Pause
-}
-
-
-function DatBr-Manual {
-    Banner "Select .dat/.dat.br/.br.dat manually"
-
-    # gather all acceptable input patterns
-    $datFiles = Get-ChildItem $TempDir -Include *.dat.br, *.br.dat, *.dat -File -ErrorAction SilentlyContinue
-    if(-not $datFiles){
-        ErrorMsg "No compatible .dat/.br.dat/.dat.br files found in $TempDir"
-        Pause
-        return
-    }
-
-    Write-Host "Available input files:`n" -ForegroundColor Cyan
-    for($i=0; $i -lt $datFiles.Count; $i++) {
-        Write-Host ("[$i] " + $datFiles[$i].Name) -ForegroundColor Cyan
-    }
-
-    do {
-        $sel = Read-Host "Enter number of file to convert (or Q to cancel)"
-        if($sel -match '^[Qq]$'){return}
-    } while ($sel -notmatch '^\d+$' -or [int]$sel -ge $datFiles.Count)
-
-    $input = $datFiles[[int]$sel]
-    $list  = Get-ChildItem "$TempDir\*.transfer.list" -File | Select-Object -First 1
-    if(-not (Test-Path $list)){
-        ErrorMsg "No system.transfer.list found in $TempDir"
-        Pause
-        return
-    }
-
-    # normalize naming
+    $input = $datFiles[0]
     $base = [IO.Path]::GetFileNameWithoutExtension([IO.Path]::GetFileNameWithoutExtension($input.Name))
     $dat  = Join-Path $TempDir ($base + ".new.dat")
     $img  = Join-Path $OutDir  ($base + ".img")
 
-    # convert if compressed
-    if($input.Extension -eq ".br" -or $input.Name -like "*.br.dat"){
-        Brotli-Convert $input.FullName $dat
-    } else {
-        Copy-Item $input.FullName $dat -Force
-    }
+    if($input.Extension -eq ".br" -or $input.Name -like "*.br.dat"){Brotli-Convert $input.FullName $dat}
+    else {Copy-Item $input.FullName $dat -Force}
 
-    SDAT-ToIMG $dat $list.FullName $img
+    SDAT-ToIMG $dat $list[0].FullName $img
     Pause
 }
 
+function DatBr-Manual {
+    Banner "Manual .dat/.dat.br/.br.dat Selection"
+    $datFiles = Find-FileRecursive $TempDir @("*.dat.br","*.br.dat","*.dat")
+    if(-not $datFiles){ErrorMsg "No .dat/.br.dat/.dat.br files found under $TempDir"; Pause; return}
 
+    Write-Host "Available input files:`n" -ForegroundColor Cyan
+    for($i=0; $i -lt $datFiles.Count; $i++) {
+        Write-Host ("[$i] " + $datFiles[$i].FullName) -ForegroundColor Cyan
+    }
+
+    do {
+        $sel = Read-Host "Select file number (or Q to cancel)"
+        if($sel -match '^[Qq]$'){return}
+    } while ($sel -notmatch '^\d+$' -or [int]$sel -ge $datFiles.Count)
+
+    $input = $datFiles[[int]$sel]
+    $list  = Find-FileRecursive $TempDir @("*.transfer.list")
+    if(-not $list){ErrorMsg "No transfer list found."; Pause; return}
+
+    $base = [IO.Path]::GetFileNameWithoutExtension([IO.Path]::GetFileNameWithoutExtension($input.Name))
+    $dat  = Join-Path $TempDir ($base + ".new.dat")
+    $img  = Join-Path $OutDir  ($base + ".img")
+
+    if($input.Extension -eq ".br" -or $input.Name -like "*.br.dat"){Brotli-Convert $input.FullName $dat}
+    else {Copy-Item $input.FullName $dat -Force}
+
+    SDAT-ToIMG $dat $list[0].FullName $img
+    Pause
+}
 
 function Payload-ToIMG {
     Banner "payload.bin to images"
-    $payload = Join-Path $TempDir 'payload.bin'
-    if(-not (Test-Path $payload)){ErrorMsg "payload.bin missing"; Pause; return}
+    $payload = Find-FileRecursive $TempDir @("payload.bin")
+    if(-not $payload){ErrorMsg "payload.bin not found."; Pause; return}
     Ensure-Dir (Join-Path $OutDir 'payload_output')
     Info "Dumping payload.bin (this may take time)..."
     & (Tool 'payload_dumper.exe')
@@ -209,14 +177,14 @@ function Payload-ToIMG {
 }
 
 function Extract-IMG {
-    Banner "Extract system.img"
-    $img = Join-Path $OutDir 'system.img'
-    if(-not (Test-Path $img)){ErrorMsg "system.img not found."; Pause; return}
+    Banner "Extract IMG Filesystem"
+    $img = Find-FileRecursive $OutDir @("*.img")
+    if(-not $img){ErrorMsg "No .img found in extracted_files."; Pause; return}
     Info "Cleaning previous extraction..."
     if(Test-Path $OutSystem){Remove-Item -Recurse -Force $OutSystem}
     Ensure-Dir $OutSystem
-    Info "Extracting system.img into extracted_files/system"
-    & (Tool 'Imgextractor.exe') $img $OutSystem -i
+    Info "Extracting $($img[0].Name) into extracted_files/system"
+    & (Tool 'Imgextractor.exe') $img[0].FullName $OutSystem -i
     Done "Filesystem extracted to $OutSystem"
     Start-Process explorer.exe $OutSystem
     Pause
@@ -227,46 +195,24 @@ function Extract-IMG {
 while ($true) {
     Clear-Host
 
-    # --- Ready indicators ---
-    $readyZip      = [bool](Get-ChildItem "$ScriptDir\*.zip" -ErrorAction SilentlyContinue)
-    $readyDat      = (Test-Path "$TempDir\system.new.dat.br") -and (Test-Path "$TempDir\system.transfer.list")
-    $readyPayload  = Test-Path "$TempDir\payload.bin"
-    $readyImg      = Test-Path "$OutDir\system.img"
+    $readyZip  = (Find-FileRecursive $ScriptDir @("*.zip")).Count -gt 0
+    $readyDat  = (Find-FileRecursive $TempDir @("*.dat.br","*.br.dat","*.dat")).Count -gt 0
+    $readyPayload = (Find-FileRecursive $TempDir @("payload.bin")).Count -gt 0
+    $readyImg  = (Find-FileRecursive $OutDir @("*.img")).Count -gt 0
 
     Write-Host "=============================="
     Write-Host "   ROM Extraction Utility"
     Write-Host "==============================`n"
 
-    # helper to colorize labels
-    function Label($found) {
-        if ($found) { Write-Host "[FOUND]" -ForegroundColor Green -NoNewline }
-    }
+    function Label($found) { if ($found) { Write-Host "[FOUND]" -ForegroundColor Green -NoNewline } }
+    function OptionalLabel() { Write-Host "[OPTIONAL]" -ForegroundColor Yellow -NoNewline }
 
-    function OptionalLabel() {
-        Write-Host "[OPTIONAL]" -ForegroundColor Yellow -NoNewline
-    }
-
-    # Menu items
-    Write-Host "[" -NoNewline; Write-Host "1" -NoNewline -ForegroundColor Cyan; Write-Host "] Full ZIP to system.img " -NoNewline
-    if ($readyZip) { Label $true } else { Write-Host "" }
-    Write-Host ""
-
-    Write-Host "[" -NoNewline; Write-Host "2" -NoNewline -ForegroundColor Cyan; Write-Host "] system.new.dat.br to system.img " -NoNewline
-    if ($readyDat) { Label $true } else { Write-Host "" }
-    Write-Host ""
-
-    Write-Host "[" -NoNewline; Write-Host "3" -NoNewline -ForegroundColor Cyan; Write-Host "] payload.bin to images " -NoNewline
-    if ($readyPayload) { Label $true } else { Write-Host "" }
-    Write-Host ""
-
-    Write-Host "[" -NoNewline; Write-Host "4" -NoNewline -ForegroundColor Cyan; Write-Host "] Extract system.img to filesystem " -NoNewline
-    if ($readyImg) { Label $true } else { Write-Host "" }
-    Write-Host ""
-
-    Write-Host "[" -NoNewline; Write-Host "5" -NoNewline -ForegroundColor Cyan; Write-Host "] Manually select .dat.br to system.img " -NoNewline
-    OptionalLabel
-    Write-Host "`n"
-    Write-Host "[Q] Quit" -ForegroundColor Red
+    Write-Host "[" -NoNewline; Write-Host "1" -NoNewline -ForegroundColor Cyan; Write-Host "] Full ZIP to IMG " -NoNewline; if($readyZip){Label $true}; Write-Host ""
+    Write-Host "[" -NoNewline; Write-Host "2" -NoNewline -ForegroundColor Cyan; Write-Host "] DAT/BR.DAT/BR to IMG " -NoNewline; if($readyDat){Label $true}; Write-Host ""
+    Write-Host "[" -NoNewline; Write-Host "3" -NoNewline -ForegroundColor Cyan; Write-Host "] payload.bin to images " -NoNewline; if($readyPayload){Label $true}; Write-Host ""
+    Write-Host "[" -NoNewline; Write-Host "4" -NoNewline -ForegroundColor Cyan; Write-Host "] Extract IMG filesystem " -NoNewline; if($readyImg){Label $true}; Write-Host ""
+    Write-Host "[" -NoNewline; Write-Host "5" -NoNewline -ForegroundColor Cyan; Write-Host "] Manual .dat/.br.dat/.dat.br to IMG " -NoNewline; OptionalLabel; Write-Host ""
+    Write-Host "`n[Q] Quit" -ForegroundColor Red
 
     $opt = Read-Host "`nSelect option"
     switch -Regex ($opt) {
@@ -280,23 +226,14 @@ while ($true) {
     }
 }
 
-# ---------------- Exit cleanup prompt ----------------
 Banner "Exiting"
-
 if(Test-Path $TempDir){
     Write-Host "`nTemporary directory detected: $TempDir" -ForegroundColor Yellow
     $choice = Read-Host "Delete temporary files now? (y/N)"
     if($choice -eq 'y'){
-        try {
-            Remove-Item -Recurse -Force $TempDir
-            Done "Temporary directory deleted."
-        } catch {
-            ErrorMsg "Failed to delete temp directory: $_"
-        }
-    } else {
-        Warn "Temporary directory retained."
-    }
+        try { Remove-Item -Recurse -Force $TempDir; Done "Temporary directory deleted." }
+        catch { ErrorMsg "Failed to delete temp directory: $_" }
+    } else { Warn "Temporary directory retained." }
 }
-
 Write-Host "`nGoodbye." -ForegroundColor Gray
 exit
