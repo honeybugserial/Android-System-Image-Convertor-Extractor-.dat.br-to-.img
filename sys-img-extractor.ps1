@@ -151,26 +151,50 @@ function DatBr-ToIMG {
 
 
 function DatBr-Manual {
-    Banner "Select .dat.br manually"
-    $datBr = Select-DatBr
-    if(-not $datBr){Warn "Cancelled."; Pause; return}
+    Banner "Select .dat/.dat.br/.br.dat manually"
 
-    $list = Get-ChildItem "$TempDir\*.transfer.list" -File | Select-Object -First 1
-    if(-not (Test-Path $list)) {
-        ErrorMsg "No transfer list (.transfer.list) found in $TempDir"
+    # gather all acceptable input patterns
+    $datFiles = Get-ChildItem $TempDir -Include *.dat.br, *.br.dat, *.dat -File -ErrorAction SilentlyContinue
+    if(-not $datFiles){
+        ErrorMsg "No compatible .dat/.br.dat/.dat.br files found in $TempDir"
         Pause
         return
     }
 
-    # derive base name dynamically
-    $base = [IO.Path]::GetFileNameWithoutExtension([IO.Path]::GetFileNameWithoutExtension($datBr.Name))
+    Write-Host "Available input files:`n" -ForegroundColor Cyan
+    for($i=0; $i -lt $datFiles.Count; $i++) {
+        Write-Host ("[$i] " + $datFiles[$i].Name) -ForegroundColor Cyan
+    }
+
+    do {
+        $sel = Read-Host "Enter number of file to convert (or Q to cancel)"
+        if($sel -match '^[Qq]$'){return}
+    } while ($sel -notmatch '^\d+$' -or [int]$sel -ge $datFiles.Count)
+
+    $input = $datFiles[[int]$sel]
+    $list  = Get-ChildItem "$TempDir\*.transfer.list" -File | Select-Object -First 1
+    if(-not (Test-Path $list)){
+        ErrorMsg "No system.transfer.list found in $TempDir"
+        Pause
+        return
+    }
+
+    # normalize naming
+    $base = [IO.Path]::GetFileNameWithoutExtension([IO.Path]::GetFileNameWithoutExtension($input.Name))
     $dat  = Join-Path $TempDir ($base + ".new.dat")
     $img  = Join-Path $OutDir  ($base + ".img")
 
-    Brotli-Convert $datBr.FullName $dat
+    # convert if compressed
+    if($input.Extension -eq ".br" -or $input.Name -like "*.br.dat"){
+        Brotli-Convert $input.FullName $dat
+    } else {
+        Copy-Item $input.FullName $dat -Force
+    }
+
     SDAT-ToIMG $dat $list.FullName $img
     Pause
 }
+
 
 
 function Payload-ToIMG {
